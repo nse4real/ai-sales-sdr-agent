@@ -7,12 +7,14 @@ import json
 import os
 import re
 import uuid
+import warnings
 from dataclasses import dataclass
 from datetime import date, timedelta
 from email.header import decode_header, make_header
 from email.policy import default as default_policy
 from email.utils import parseaddr
 from typing import Any, Callable, Sequence
+from urllib.parse import urlsplit
 
 import requests
 from agents import Agent, RunContextWrapper, Runner, function_tool, trace
@@ -55,6 +57,7 @@ class Config:
     send_to_self: bool
     telegram_bot_token: str
     telegram_chat_id: str
+    booking_link: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,29 @@ class DealContext:
 
 def normalize_email(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def validated_booking_link(value: str) -> str:
+    if not value:
+        return ""
+    valid = len(value) <= 200 and not any(
+        char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
+        for char in value
+    )
+    try:
+        parsed = urlsplit(value)
+        valid = valid and (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        warnings.warn("Ignoring invalid BOOKING_LINK.", stacklevel=2)
+        return ""
+    return value
 
 
 def get_config() -> Config:
@@ -82,6 +108,7 @@ def get_config() -> Config:
         send_to_self=send_to_self,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        booking_link=validated_booking_link(os.getenv("BOOKING_LINK", "")),
     )
 
 
@@ -173,14 +200,19 @@ def send_and_log(deal_id: str, subject: str, text_body: str, html_body: str) -> 
     stage = deal.get("stage", "outreach")
     if stage in {"won", "lost"}:
         return f"Blocked: deal stage is {stage}."
-    if deal.get("opted_out", False):
+    prospect_email = normalize_email(deal.get("prospect", {}).get("email"))
+    if any(
+        existing.get("opted_out", False)
+        and normalize_email(existing.get("prospect", {}).get("email")) == prospect_email
+        for existing in deals.values()
+    ):
         return "Blocked: prospect has opted out."
     if deal.get("touches", 0) >= MAX_TOUCHES:
         return f"Blocked: touch limit of {MAX_TOUCHES} reached. Set the stage to lost instead."
 
     send_resend(
         deal_id,
-        normalize_email(deal.get("prospect", {}).get("email")),
+        prospect_email,
         subject,
         text_body,
         html_body,
@@ -328,23 +360,28 @@ def notify_human(ctx: RunContextWrapper[DealContext], message: str) -> str:
 
 
 def make_outreach_writer() -> Agent:
+    config = get_config()
     return Agent(
         name="Outreach Writer",
-        model=get_config().model_name,
+        model=config.model_name,
         output_type=Email,
         instructions=f"""
 {PRODUCT_PITCH}
 You write the first cold email. Address the prospect by first name, mention their company once,
 and propose a short call. Under 120 words. Professional and warm.
 Return subject, text_body and html_body.
-""",
+""" + (
+            f"Whenever you propose a call, include this exact booking link: {config.booking_link}\n"
+            if config.booking_link else ""
+        ),
     )
 
 
 def make_closer() -> Agent:
+    config = get_config()
     return Agent(
         name="SDR Closer",
-        model=get_config().model_name,
+        model=config.model_name,
         tools=[send_reply, set_stage, notify_human],
         instructions=f"""
 {PRODUCT_PITCH}
@@ -358,7 +395,10 @@ Take exactly one next step:
 - A clear no: use set_stage with "lost".
 Never set won yourself. Emails are under 120 words. Use subject 'Re: <original subject>'.
 Finish with a one-line summary of what you did.
-""",
+""" + (
+            f"Whenever you propose a call, include this exact booking link: {config.booking_link}\n"
+            if config.booking_link else ""
+        ),
     )
 
 
@@ -404,8 +444,8 @@ async def handle_reply(reply: dict[str, str]) -> None:
     message_id = str(reply.get("message_id") or reply.get("uid") or "")
     deals = load_deals()
     deal = deals.get(deal_id)
-    if not deal or deal.get("stage", "outreach") in {"won", "lost"}:
-        print("Ignoring reply for closed or unknown deal", deal_id)
+    if not deal:
+        print("Ignoring reply for unknown deal", deal_id)
         return
 
     sender = normalize_email(reply.get("from"))
@@ -434,14 +474,19 @@ async def handle_reply(reply: dict[str, str]) -> None:
                         "text": reply["text"],
                     }
                 )
-            current["stage"] = "lost"
+            if current.get("stage") != "won":
+                current["stage"] = "lost"
             current["opted_out"] = True
             handled = current.setdefault("handled_ids", [])
             if message_id not in handled:
                 handled.append(message_id)
 
-        update_deal(deal_id, record_opt_out)
-        notify(f"Opt-out recorded; deal lost: {deal_id}.")
+        updated = update_deal(deal_id, record_opt_out)
+        notify(f"Opt-out recorded; deal {updated['stage']}: {deal_id}.")
+        return
+
+    if deal.get("stage", "outreach") in {"won", "lost"}:
+        print("Ignoring reply for closed deal", deal_id)
         return
 
     history = deal.setdefault("history", [])
