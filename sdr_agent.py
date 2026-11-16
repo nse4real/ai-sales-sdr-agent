@@ -144,6 +144,16 @@ def update_deal(
     return deal
 
 
+def run_usage(result: Any) -> dict[str, int]:
+    usage = result.context_wrapper.usage
+    return {
+        "requests": usage.requests,
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.input_tokens_details.cached_tokens,
+        "output_tokens": usage.output_tokens,
+    }
+
+
 def notify(text: str) -> None:
     config = get_config()
     if not (config.telegram_bot_token and config.telegram_chat_id):
@@ -426,6 +436,7 @@ async def start_deal(prospect: dict[str, str]) -> str:
         "history": [],
         "handled_ids": [],
         "opted_out": False,
+        "usage": run_usage(result),
     }
     save_deals(deals)
     print(send_and_log(deal_id, draft.subject, draft.text_body, draft.html_body))
@@ -519,11 +530,16 @@ async def handle_reply(reply: dict[str, str]) -> None:
         result = await Runner.run(
             make_closer(), prompt, context=DealContext(deal_id)
         )
+    usage = run_usage(result)
 
     def record_handled(current: dict[str, Any]) -> None:
         current_handled = current.setdefault("handled_ids", [])
         if message_id not in current_handled:
             current_handled.append(message_id)
+        previous_usage = current.get("usage", {})
+        current["usage"] = {
+            key: previous_usage.get(key, 0) + value for key, value in usage.items()
+        }
 
     update_deal(deal_id, record_handled)
     print(result.final_output)
@@ -642,10 +658,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.exit(2, f"error: {exc.args[0]}\n")
     elif args.command == "deals":
         for deal_id, deal in load_deals().items():
+            usage = deal.get("usage", {})
             print(
                 f"{deal_id} | {deal.get('prospect', {}).get('company', 'unknown')} "
                 f"| {deal.get('stage', 'outreach')} "
-                f"| touches={deal.get('touches', 0)}"
+                f"| touches={deal.get('touches', 0)} "
+                f"| tokens in={usage.get('input_tokens', 0)} "
+                f"(cached {usage.get('cached_input_tokens', 0)}) "
+                f"out={usage.get('output_tokens', 0)} "
+                f"requests={usage.get('requests', 0)}"
             )
     return 0
 

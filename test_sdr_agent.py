@@ -84,6 +84,22 @@ def reply(message_id="<m1>", text="Yes, tell me more", **overrides):
     return value
 
 
+def runner_result(
+    final_output, requests=1, input_tokens=100, cached_tokens=20, output_tokens=30
+):
+    return SimpleNamespace(
+        final_output=final_output,
+        context_wrapper=SimpleNamespace(
+            usage=SimpleNamespace(
+                requests=requests,
+                input_tokens=input_tokens,
+                input_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+                output_tokens=output_tokens,
+            )
+        ),
+    )
+
+
 def tool_context(deal_id="acme-1234abcd", tool_name="send_reply", arguments="{}"):
     return ToolContext(
         sdr_agent.DealContext(deal_id),
@@ -296,7 +312,7 @@ def test_unknown_sender_is_not_passed_to_closer(monkeypatch):
 
     async def fake_run(*args, **kwargs):
         calls.append(args)
-        return SimpleNamespace(final_output="should not happen")
+        return runner_result("should not happen")
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
 
@@ -309,14 +325,20 @@ def test_unknown_sender_is_not_passed_to_closer(monkeypatch):
 
 
 def test_closer_failure_retries_without_duplicate_history(monkeypatch):
-    store_deal(make_deal())
+    original_usage = {
+        "requests": 2,
+        "input_tokens": 200,
+        "cached_input_tokens": 50,
+        "output_tokens": 40,
+    }
+    store_deal(make_deal(usage=original_usage))
     calls = []
 
     async def fake_run(agent, prompt, context=None):
         calls.append(context.deal_id)
         if len(calls) == 1:
             raise RuntimeError("closer failed")
-        return SimpleNamespace(final_output="handled")
+        return runner_result("handled")
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
 
@@ -325,6 +347,7 @@ def test_closer_failure_retries_without_duplicate_history(monkeypatch):
     first = sdr_agent.load_deals()["acme-1234abcd"]
     assert first["handled_ids"] == []
     assert len(first["history"]) == 1
+    assert first["usage"] == original_usage
 
     asyncio.run(sdr_agent.handle_reply(reply()))
 
@@ -333,6 +356,16 @@ def test_closer_failure_retries_without_duplicate_history(monkeypatch):
     assert second["handled_ids"] == ["<m1>"]
     assert len(second["history"]) == 1
     assert second["history"][0]["message_id"] == "<m1>"
+    assert second["usage"] == {
+        "requests": 3,
+        "input_tokens": 300,
+        "cached_input_tokens": 70,
+        "output_tokens": 70,
+    }
+
+    asyncio.run(sdr_agent.handle_reply(reply()))
+    assert sdr_agent.load_deals()["acme-1234abcd"]["usage"] == second["usage"]
+    assert len(calls) == 2
 
 
 def test_identical_replies_with_different_message_ids_both_reach_closer(monkeypatch):
@@ -341,7 +374,7 @@ def test_identical_replies_with_different_message_ids_both_reach_closer(monkeypa
 
     async def fake_run(agent, prompt, context=None):
         calls.append(context.deal_id)
-        return SimpleNamespace(final_output="handled")
+        return runner_result("handled")
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
 
@@ -352,6 +385,12 @@ def test_identical_replies_with_different_message_ids_both_reach_closer(monkeypa
     assert len(calls) == 2
     assert stored["handled_ids"] == ["<one>", "<two>"]
     assert [item["message_id"] for item in stored["history"]] == ["<one>", "<two>"]
+    assert stored["usage"] == {
+        "requests": 2,
+        "input_tokens": 200,
+        "cached_input_tokens": 40,
+        "output_tokens": 60,
+    }
 
 
 def test_stop_sets_lost_and_opted_out_without_email_or_closer(monkeypatch):
@@ -363,7 +402,7 @@ def test_stop_sets_lost_and_opted_out_without_email_or_closer(monkeypatch):
 
     async def fake_run(*args, **kwargs):
         calls.append(("closer", args))
-        return SimpleNamespace(final_output="should not happen")
+        return runner_result("should not happen")
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
 
@@ -439,7 +478,7 @@ def test_final_handled_save_preserves_real_tool_send(monkeypatch):
         await sdr_agent.send_reply.on_invoke_tool(
             tool_context(context.deal_id, arguments=arguments), arguments
         )
-        return SimpleNamespace(final_output="answered")
+        return runner_result("answered")
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_closer)
 
@@ -449,6 +488,12 @@ def test_final_handled_save_preserves_real_tool_send(monkeypatch):
     assert stored["touches"] == 1
     assert stored["handled_ids"] == ["<m1>"]
     assert [item["from"] for item in stored["history"]] == ["prospect", "us"]
+    assert stored["usage"] == {
+        "requests": 1,
+        "input_tokens": 100,
+        "cached_input_tokens": 20,
+        "output_tokens": 30,
+    }
 
 
 def test_real_decorated_tool_propagates_resend_failure(monkeypatch):
@@ -491,7 +536,7 @@ def test_start_deal_refuses_previously_opted_out_email(monkeypatch):
 
     async def fake_run(*args, **kwargs):
         calls.append(args)
-        return SimpleNamespace(final_output=None)
+        return runner_result(None)
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
 
@@ -514,7 +559,7 @@ def test_start_deal_uses_uuid_suffix_and_normalizes_email(monkeypatch):
     draft = sdr_agent.Email(subject="Hello", text_body="Text", html_body="<p>Text</p>")
 
     async def fake_run(*args, **kwargs):
-        return SimpleNamespace(final_output=draft)
+        return runner_result(draft)
 
     monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
     monkeypatch.setattr(sdr_agent, "send_and_log", lambda *args: "sent")
@@ -533,6 +578,75 @@ def test_start_deal_uses_uuid_suffix_and_normalizes_email(monkeypatch):
     assert deal_id.startswith("acme-labs-")
     assert len(deal_id.rsplit("-", 1)[1]) == 8
     assert sdr_agent.load_deals()[deal_id]["prospect"]["email"] == "ada@example.com"
+
+
+def test_start_and_handled_reply_sum_usage(monkeypatch):
+    draft = sdr_agent.Email(subject="Hello", text_body="Text", html_body="<p>Text</p>")
+    results = iter(
+        [
+            runner_result(
+                draft, requests=1, input_tokens=123, cached_tokens=0, output_tokens=45
+            ),
+            runner_result(
+                "handled", requests=2, input_tokens=678, cached_tokens=200,
+                output_tokens=90,
+            ),
+        ]
+    )
+
+    async def fake_run(*args, **kwargs):
+        return next(results)
+
+    monkeypatch.setattr(sdr_agent.Runner, "run", fake_run)
+    monkeypatch.setattr(sdr_agent, "send_resend", lambda *args: "email-1")
+
+    deal_id = asyncio.run(sdr_agent.start_deal(make_deal()["prospect"]))
+    assert sdr_agent.load_deals()[deal_id]["usage"] == {
+        "requests": 1,
+        "input_tokens": 123,
+        "cached_input_tokens": 0,
+        "output_tokens": 45,
+    }
+
+    asyncio.run(sdr_agent.handle_reply(reply(deal_id=deal_id)))
+
+    assert sdr_agent.load_deals()[deal_id]["usage"] == {
+        "requests": 3,
+        "input_tokens": 801,
+        "cached_input_tokens": 200,
+        "output_tokens": 135,
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, "tokens in=0 (cached 0) out=0 requests=0"),
+        (
+            {"usage": {
+                "requests": 3,
+                "input_tokens": 801,
+                "cached_input_tokens": 200,
+                "output_tokens": 135,
+            }},
+            "tokens in=801 (cached 200) out=135 requests=3",
+        ),
+    ],
+)
+def test_deals_cli_displays_usage_without_writing(overrides, expected, monkeypatch, capsys):
+    original = make_deal(**overrides)
+    store_deal(original)
+
+    def no_save(*args):
+        raise AssertionError("Listing deals must not write")
+
+    monkeypatch.setattr(sdr_agent, "save_deals", no_save)
+
+    assert sdr_agent.main(["deals"]) == 0
+    assert capsys.readouterr().out == (
+        f"acme-1234abcd | Acme | outreach | touches=0 | {expected}\n"
+    )
+    assert sdr_agent.load_deals()["acme-1234abcd"] == original
 
 
 def test_save_deals_atomically_replaces_file(monkeypatch):
