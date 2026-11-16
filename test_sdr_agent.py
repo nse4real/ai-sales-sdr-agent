@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from contextlib import nullcontext
+from datetime import date
 from email.message import EmailMessage
 from types import SimpleNamespace
 
@@ -466,6 +467,9 @@ def test_fetch_replies_uses_peek_and_string_ids():
 
     replies = sdr_agent.fetch_replies(imap)
 
+    search = next(call for call in imap.calls if call[0] == "search")
+    assert "UNSEEN" not in search  # a reply opened in Gmail first must still be found
+    assert search[2] == "SINCE"
     fetch = next(call for call in imap.calls if call[0] == "fetch")
     assert fetch[2] == "(BODY.PEEK[])"
     assert replies[0]["uid"] == "42"
@@ -473,6 +477,10 @@ def test_fetch_replies_uses_peek_and_string_ids():
     assert replies[0]["from"] == "ada@example.com"
     assert replies[0]["text"] == "Hello"
     assert not any(call[0] == "store" for call in imap.calls)
+
+
+def test_imap_since_uses_english_month_names():
+    assert sdr_agent.imap_since(14, today=date(2026, 3, 5)) == "19-Feb-2026"
 
 
 def test_html_fallback_drops_script_style_tags_and_unescapes():

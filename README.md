@@ -12,7 +12,7 @@ graph LR
     B -->|send| C[Resend API]
     C --> D[Prospect Inbox]
     D -->|reply| E[Gmail IMAP]
-    E -->|unread replies| F[Closer Agent]
+    E -->|new replies| F[Closer Agent]
     F -->|send_reply| C
     F -->|set_stage| G[(deals.json)]
     F -->|notify_human| H[Telegram]
@@ -70,7 +70,7 @@ python sdr_agent.py won <deal_id>
 
 ## Reply handling
 
-`run_cycle()` fetches unread tagged messages with `BODY.PEEK[]`, which does not implicitly mark them read. A message is marked read only after it is handled. A closer failure leaves it unread for the next cycle, while other replies in the current cycle still run. Message IDs prevent duplicate history entries on retry, and identical replies with different Message-IDs are handled independently.
+`run_cycle()` fetches tagged messages from the last 14 days, read or unread, with `BODY.PEEK[]`. Opening a reply in Gmail first does not hide it from the agent: the deal's list of handled Message-IDs, not the read flag, decides what is done. A handled message is marked read for your convenience. A closer failure leaves the message unhandled for the next cycle, while other replies in the current cycle still run. Message IDs prevent duplicate history entries on retry, and identical replies with different Message-IDs are handled independently.
 
 Each state update reloads `deals.json` before changing fields. Saves use a temporary file followed by an atomic replace. Delivery is **at-least-once**: a crash immediately after a successful send can cause that send to be repeated on retry.
 
@@ -102,6 +102,6 @@ OpenAI Agents SDK tracing uploads run data to OpenAI by default. Set `OPENAI_AGE
 
 - `deals.json` is a single-process store with no locking. Concurrent processes can lose updates; a database with transactions would be safer.
 - Polling Gmail is simple but delayed. Inbound webhooks would provide faster replies; no webhook server is included.
-- Delivery is at-least-once, and failed replies remain unread. There is no dead-letter queue for repeatedly failing messages.
+- Delivery is at-least-once, and failed replies are retried on the next cycle. Replies older than 14 days (`REPLY_WINDOW_DAYS`) are not fetched. There is no dead-letter queue for repeatedly failing messages.
 - Routing uses only the subject tag, not `In-Reply-To` or `References`, so a removed or changed tag breaks matching.
 - A dashboard, package layout, and PyPI distribution are intentionally out of scope to keep this a single-file tool.

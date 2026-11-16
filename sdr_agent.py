@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from email.header import decode_header, make_header
 from email.policy import default as default_policy
 from email.utils import parseaddr
@@ -24,6 +25,8 @@ PRODUCT_PITCH = (
 )
 DEALS_FILE = "deals.json"
 MAX_TOUCHES = 6
+REPLY_WINDOW_DAYS = 14  # replies older than this are not fetched
+IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 VALID_STAGES = {"outreach", "negotiating", "won", "lost"}
 AGENT_STAGES = {"negotiating", "lost"}
 REF_RE = re.compile(r"\[ref:([\w-]+)\]")
@@ -236,12 +239,24 @@ def message_text(message: email_lib.message.Message) -> str:
     return re.split(r"\n(?=On .+wrote:|>)", text)[0].strip()
 
 
+def imap_since(days: int, today: date | None = None) -> str:
+    # IMAP needs English month names; strftime("%b") follows the OS locale.
+    day = (today or date.today()) - timedelta(days=days)
+    return f"{day.day:02d}-{IMAP_MONTHS[day.month - 1]}-{day.year}"
+
+
 def fetch_replies(imap: imaplib.IMAP4_SSL | None = None) -> list[dict[str, str]]:
     owns_connection = imap is None
     if imap is None:
         imap = open_imap()
     try:
-        _, data = imap.uid("search", None, "UNSEEN", "SUBJECT", "ref:")
+        # Read and unread both count: the owner may open a reply in Gmail first.
+        # handled_ids, not the \Seen flag, decides what is already done.
+        # shortcut: refetches every tagged message from the window each cycle; fine for
+        # hundreds of threads, track the last seen UID if volume grows.
+        _, data = imap.uid(
+            "search", None, "SINCE", imap_since(REPLY_WINDOW_DAYS), "SUBJECT", "ref:"
+        )
         replies = []
         for raw_uid in data[0].split():
             uid = raw_uid.decode("ascii") if isinstance(raw_uid, bytes) else str(raw_uid)
@@ -404,8 +419,7 @@ async def handle_reply(reply: dict[str, str]) -> None:
         return
 
     handled_ids = deal.setdefault("handled_ids", [])
-    if message_id in handled_ids:
-        print(f"Reply {message_id} already handled for {deal_id}")
+    if message_id in handled_ids:  # normal every cycle now that read mail is fetched too
         return
 
     if is_opt_out(reply.get("text", "")):
