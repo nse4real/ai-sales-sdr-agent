@@ -95,15 +95,17 @@ python sdr_agent.py won <deal_id>
 
 ## Cost per deal
 
-Measured usage for one live deal (one start + one handled reply):
+About **$0.004 per conversation**, or roughly $3.60 per 1,000 deals at one reply each. Measured on a live deal on 2026-11-16 (first email + one handled pricing question, which the closer answered and escalated to the owner):
 
 | Measurement | Total |
 | --- | --- |
-| Input tokens (including cached tokens) | TBD |
-| Cached input tokens | TBD |
-| Output tokens | TBD |
-| Requests | TBD |
-| Cost (USD) | TBD |
+| Input tokens (including cached tokens) | 1,904 |
+| Cached input tokens | 0 |
+| Output tokens | 491 |
+| Requests | 3 |
+| Cost (USD) | $0.0036 |
+
+Each extra reply adds a closer run, and its input grows with the deal history, so longer threads cost more per reply.
 
 Using gpt-5.4-mini Standard prices of $0.75 per 1M input tokens, $0.075 per 1M cached input tokens, and $4.50 per 1M output tokens ([OpenAI pricing](https://developers.openai.com/api/docs/pricing), checked 2026-11-16):
 
