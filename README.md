@@ -93,6 +93,30 @@ python sdr_agent.py won <deal_id>
 
 `start`, `check`, and `loop` validate required environment variables before doing any work. Only the `won` CLI command can mark a deal `won`; the closer can set only `negotiating` or `lost`.
 
+## Cost per deal
+
+Measured usage for one live deal (one start + one handled reply):
+
+| Measurement | Total |
+| --- | --- |
+| Input tokens (including cached tokens) | TBD |
+| Cached input tokens | TBD |
+| Output tokens | TBD |
+| Requests | TBD |
+| Cost (USD) | TBD |
+
+Using gpt-5.4-mini Standard prices of $0.75 per 1M input tokens, $0.075 per 1M cached input tokens, and $4.50 per 1M output tokens ([OpenAI pricing](https://developers.openai.com/api/docs/pricing), checked 2026-11-16):
+
+```text
+cost = ((input − cached) × 0.75 + cached × 0.075 + output × 4.50) / 1,000,000 USD
+```
+
+Cached tokens are already included in `input_tokens`; subtracting them before applying the input rate avoids charging them twice. Prices are used here rather than stored in code because they can change.
+
+See your own cumulative usage with `python sdr_agent.py deals`; each line appends `| tokens in=<input> (cached <cached>) out=<output> requests=<n>`. Older deals without recorded usage display zeros.
+
+A closer run that raises records no usage; its partial cost is excluded, and a retry counts only the successful run.
+
 ## What the tests protect
 
 The suite is fully offline. Resend, Telegram, IMAP, and the agent runner are faked. [test_sdr_agent.py](test_sdr_agent.py) checks that:
