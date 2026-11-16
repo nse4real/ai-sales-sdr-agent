@@ -1,17 +1,14 @@
 # AI Sales SDR Agent
 
-AI sales agent that writes and sends cold emails, reads prospect replies, and keeps the conversation going until a deal is won or lost. Built with the OpenAI Agents SDK, the Resend API, Gmail IMAP and Telegram.
+An AI sales agent that writes and sends cold email, reads prospect replies, and keeps the conversation going until a deal is won or lost. It uses the OpenAI Agents SDK, Resend, Gmail IMAP, and Telegram, with all application code in `sdr_agent.py`.
 
-## Overview
+## How it works
 
-The agent sends a personalised first email to each prospect through Resend. Every email carries a `[ref:<deal_id>]` tag, so when the prospect replies, the reply is matched to its deal. A closer agent reads the reply, decides the next step, answers it, and updates the deal stage. Telegram sends an alert for every email, reply and deal outcome, so you can follow each deal from your phone.
+The outreach writer creates a personalised first email. Every message carries a `[ref:<deal_id>]` subject tag so replies can be matched to a deal. The closer agent reads each reply and chooses one tool: `send_reply`, `set_stage`, or `notify_human`. Telegram alerts the owner about email, replies, opt-outs, and outcomes.
 
-Guardrails: a touch limit per deal and `SEND_TO_SELF`, which routes all mail to your own address while you test.
-
-## Architecture
 ```mermaid
 graph LR
-    A[Prospect List] -->|first email| B[Outreach Writer]
+    A[Prospect] -->|first email| B[Outreach Writer]
     B -->|send| C[Resend API]
     C --> D[Prospect Inbox]
     D -->|reply| E[Gmail IMAP]
@@ -21,69 +18,90 @@ graph LR
     F -->|notify_human| H[Telegram]
 ```
 
-**Components:**
-- **Outreach Writer:** LLM agent that writes the first cold email (structured output: subject, text, HTML)
-- **Closer Agent:** LLM agent with three tools: `send_reply`, `set_stage`, `notify_human`. It picks one next step per reply
-- **Sending:** Resend REST API. Replies go to your Gmail via `Reply-To`
-- **Reply Intake:** Gmail IMAP, filtered to unread messages with a `[ref:...]` subject tag
-- **Deal Store:** `deals.json` (stage, touch count, full message history per deal)
-- **Alerts:** Telegram bot
+Guardrails include six touches per deal, closed-deal and opt-out send blocks, Message-ID deduplication, sender routing checks, and a human-only `won` transition. `SEND_TO_SELF=true` routes outbound mail to `EMAIL_ADDRESS2` during testing. Edit `PRODUCT_PITCH` near the top of `sdr_agent.py` to change the product description used by both agents.
 
-## Setup Instructions
+## Setup
 
-### Prerequisites
+Prerequisites:
 
-- **Python** (3.10+)
-- **OpenAI API key**
-- **Resend account** and API key
-- **Gmail account** with IMAP enabled and an app password
-- **Telegram bot** token and your chat ID
-- Python dependencies:
+- Python 3.10+
+- An OpenAI API key
+- A Resend account and API key
+- Gmail with IMAP enabled and an app password
+- Optionally, a Telegram bot token and chat ID
+
+Install dependencies and create your local configuration:
+
 ```bash
-  pip install openai-agents python-dotenv pydantic requests
+python -m pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### Quick Start
+Fill in `.env`. Resend's default `onboarding@resend.dev` sender only delivers to the Resend account owner until a domain is verified, so keep `SEND_TO_SELF=true` for initial testing.
 
-1. Copy the environment template and fill in your keys:
+## CLI
+
+Start a deal and send its first email:
+
 ```bash
-   cp .env.example .env
+python sdr_agent.py start --first-name Ada --company "Lovelace Labs" --role "Head of Compliance" --email ada@example.com
 ```
 
-2. Open `ai_sales_sdr_agent.ipynb` and run the setup cells.
+The command prints the new deal ID. Reply from the test recipient, then process the inbox once:
 
-3. Send the first email to a prospect:
-```python
-   deal_id = await start_deal({"first_name": "Ada", "company": "Lovelace Labs", "role": "Head of Compliance", "email": "ada@example.com"})
+```bash
+python sdr_agent.py check
 ```
 
-4. Reply to the email from your test address, then check the inbox:
-```python
-   await run_cycle()
+Poll every 60 seconds for 30 cycles:
+
+```bash
+python sdr_agent.py loop --interval 60 --cycles 30
 ```
 
-5. Or keep checking every 60 seconds:
-```python
-   await run_loop(interval_s=60, cycles=60)
+List deals, or let a human confirm a win:
+
+```bash
+python sdr_agent.py deals
+python sdr_agent.py won <deal_id>
 ```
 
-**Note:** Resend's default sender `onboarding@resend.dev` only delivers to the Resend account owner until a domain is verified. Keep `SEND_TO_SELF = True` for testing.
+`start`, `check`, and `loop` validate their required environment variables before doing any work. Only the `won` CLI command can mark a deal `won`; the closer can set only `negotiating` or `lost`.
 
-## Data Flow
+## Reply handling
 
-A prospect's first email is written by the outreach agent and sent through Resend, and a new deal is stored with stage `outreach`. When the prospect replies, `run_cycle()` fetches unread Gmail messages whose subject carries a `[ref:...]` tag and skips the agent's own copies. The matching deal's history is updated and the closer agent gets the deal and the reply. The closer answers through `send_reply`, moves the deal with `set_stage`, or escalates with `notify_human`. Each message is marked read only after it is handled, and a reply whose text is already in the history is skipped, so a retry cannot answer twice.
+`run_cycle()` fetches unread tagged messages with `BODY.PEEK[]`, which does not implicitly mark them read. A message is marked read only after it is handled. A closer failure leaves it unread for the next cycle, while other replies in the current cycle still run. Message IDs prevent duplicate history entries on retry, and identical replies with different Message-IDs are handled independently.
 
-## Trade-offs & Production Considerations
+Each state update reloads `deals.json` before changing fields. Saves use a temporary file followed by an atomic replace. Delivery is **at-least-once**: a crash immediately after a successful send can cause that send to be repeated on retry.
 
-Replies are read by polling Gmail over IMAP, which is simple and needs no public server. Production would use inbound webhooks (for example Resend's inbound email) so replies arrive instantly and nothing polls.
+## Testing
 
-The closer agent acts on prospect text it has not verified. A reply can ask for a stage change or a message, so the agent can be steered by the reply content. Production should keep a human approval step before a deal is marked `won` and before any pricing or contract message is sent.
+The suite is fully offline: Resend, Telegram, IMAP, and the agent runner are faked.
 
-`deals.json` is a single local file with no locking. Two processes writing at once can lose updates. Production would use a database with per-deal transactions.
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python sdr_agent.py --help
+```
 
-## Future Improvements
+CI runs the same tests on Python 3.12 for pushes and pull requests without secrets.
 
-* The agent has no human approval gate before `won`, so a deal can close from the reply text alone.
-* There is no automated test suite. Reply matching, the duplicate guard and touch limits are only checked by hand.
-* Replies are polled every 60 seconds. Webhooks would remove the polling delay and load.
-* Deal state lives in a JSON file. A database would make the store safe to share between processes.
+## Compliance
+
+Every outbound email includes `Reply "stop" to opt out.` A first non-empty reply line containing `stop`, `unsubscribe`, `remove me`, `do not contact`, or `don't contact` marks the deal lost and sets `opted_out: true` without calling the model or sending email. Closed or opted-out deals cannot send, and `start_deal` refuses an address that has previously opted out.
+
+## Security
+
+The sender check is routing, **not authentication**: sender addresses can be spoofed. Reply text is untrusted and may try to steer the model. The human-only `won` gate and code-enforced closed-deal, opt-out, and touch-limit send boundaries are the controls; they do not make reply content trustworthy.
+
+## Data & privacy
+
+OpenAI Agents SDK tracing uploads run data to OpenAI by default. Set `OPENAI_AGENTS_DISABLE_TRACING=1` to disable tracing. Reply text is forwarded to Telegram when Telegram is configured. `deals.json` contains prospect data and conversation history and is gitignored; protect and delete it according to your data-retention requirements.
+
+## Trade-offs and production considerations
+
+- `deals.json` is a single-process store with no locking. Concurrent processes can lose updates; a database with transactions would be safer.
+- Polling Gmail is simple but delayed. Inbound webhooks would provide faster replies; no webhook server is included.
+- Delivery is at-least-once, and failed replies remain unread. There is no dead-letter queue for repeatedly failing messages.
+- Routing uses only the subject tag, not `In-Reply-To` or `References`, so a removed or changed tag breaks matching.
+- A dashboard, package layout, and PyPI distribution are intentionally out of scope to keep this a single-file tool.
