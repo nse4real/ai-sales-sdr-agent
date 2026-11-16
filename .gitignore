@@ -1,5 +1,8 @@
 .env
 deals.json
+deals.json.tmp
 send_log.csv
 __pycache__/
 .ipynb_checkpoints/
+.kimi-route/
+.pytest_cache/
